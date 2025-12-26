@@ -1,71 +1,72 @@
-# modules/text_cleaner.py (replace or extend)
+# 1. Refactored modules/text_cleaner.py
 import re
 import nltk
-
+from nltk.tokenize import sent_tokenize
 try:
-    nltk.data.find("tokenizers/punkt_tab")
+    nltk.data.find("tokenizers/punkt")
 except LookupError:
     nltk.download("punkt")
-    nltk.download("punkt_tab")
 
-def extract_main_content(text: str) -> str:
+def clean_and_split(raw_text: str) -> list[str]:
     """
-    Try to start from the Abstract (or Introduction) to skip author lists, headers, etc.
+    Cleans raw text while preserving line breaks for better artifact detection,
+    then performs targeted sentence splitting and filtering.
     """
-    # Normalize line breaks
-    text = text.replace("\r", " ").replace("\n", " ")
-    # Find "Abstract" or "Introduction" to start the main content
-    match = re.search(r"\babstract\b", text, flags=re.IGNORECASE)
+    # 1. Preserve line breaks initially for better artifact isolation
+    text = raw_text.replace("\r", "")
+    
+    # 2. Section Extraction (Find 'Introduction' or 'The Current Situation')
+    # Use the original structure for better segmentation.
+    # We use re.DOTALL to match across newlines.
+    match = re.search(r"(INTRODUCTION|THE CURRENT SITUATION)", text, flags=re.IGNORECASE | re.DOTALL)
     if match:
         text = text[match.start():]
-    else:
-        match = re.search(r"\bintroduction\b", text, flags=re.IGNORECASE)
-        if match:
-            text = text[match.start():]
-    return text
-
-def remove_artifacts(text: str) -> str:
-    """
-    Remove citations, URLs, figure/table labels, numbers, and redundant spaces.
-    """
-    # Citations like [1], [1,2], [12–14]
-    text = re.sub(r"\[[0-9,\-\s]+\]", " ", text)
-    # Citations like (Smith et al., 2020)
-    text = re.sub(r"\([A-Z][a-z]+ et al\.,?\s*\d{4}\)", " ", text)
-    # URLs and hyperlinks
+    
+    # 3. Targeted Cleaning - ONLY remove page artifacts using a small window
+    # The heavy-handed ALL-CAPS and title removal is too destructive.
+    
+    # Remove "Wirth & Perkins - Learning to Learn" footer/header (based on the paper)
+    text = re.sub(r"Wirth\s*&\s*Perkins\s*-\s*Learning\s*to\s*Learn", "\n", text)
+    
+    # Remove single-line page/section numbers
+    text = re.sub(r"^\s*(\d+|\.|\s*-\s*|Page\s*\d+)\s*$", "\n", text, flags=re.MULTILINE)
+    
+    # Remove URLs (but keep surrounding text)
     text = re.sub(r"https?://\S+", " ", text)
-    # Remove figure/table labels
-    text = re.sub(r"(Figure|Table)\s*\d+[A-Za-z\-]*", " ", text)
-    # Remove leftover percentage/stat lines (e.g., 0% 20% 40%)
-    text = re.sub(r"(\d+%)+", " ", text)
-    # Remove weird sequences of dots, dashes, etc.
-    text = re.sub(r"[\.\-]{3,}", " ", text)
-    # Collapse multiple spaces
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def clean_and_split(text: str):
-    """
-    Clean the raw PDF text, remove artifacts, and split it into meaningful sentences.
-    """
-    text = extract_main_content(text)
-    text = remove_artifacts(text)
-
-    # Sentence segmentation
+    
+    # Replace the broken list items (like `1)`) with proper periods to help NLTK
+    text = re.sub(r"(\s*\d+\))\s*", ". ", text) # Replaces 1) with . 
+    
+    # 4. Normalize Whitespace and Split into Thematic Chunks
+    # Replace multiple newlines with a unique delimiter to denote a section break
+    text = re.sub(r"[\n]{2,}", " [SECTION_DELIMITER] ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    
+    # 5. Sentence Segmentation and Filtering
+    
+    # NLTK's sent_tokenize is good, but we can also use custom tokenizers if needed.
     sentences = nltk.sent_tokenize(text)
-
-    # Filter out too-short or too-long sentences
+# Filter out table-like run-on sentences identified in your latest output
     cleaned = []
     for s in sentences:
         s = s.strip()
-        if len(s.split()) <= 5:  # very short
+        # Your existing length filters are good:
+        if len(s.split()) <= 5:   
             continue
-        if len(s) > 400:         # suspiciously long (likely table text)
+        if len(s) > 400:          # Suspect run-on sentence
             continue
-        # Skip author-like lines (many commas + many capitalized words)
+        
+        # NEW FILTER: Target the specific run-on text from the Fink's table
+        # We look for a high ratio of Title-Cased words (like those used as table headers)
+        title_cased_words = sum(1 for w in s.split() if w[0].isupper() and w not in ['The', 'A', 'An'])
+        if title_cased_words / len(s.split()) > 0.45: # If almost half the words are Title Case
+            continue # Skip this sentence, it's likely part of a column/list run-on.
+
+        # Skip author-like lines (many commas + many capitalized words) - KEEP THIS
         if s.count(",") >= 4 and sum(1 for w in s.split() if w[:1].isupper()) > 6:
             continue
+        
         cleaned.append(s)
-
+        
     return cleaned
+# NOTE: The TFIDF-based ranker needs NO CHANGE, as its role is only to score.
